@@ -26,6 +26,13 @@ COPY frontend/ ./
 ARG APP_BUILD=""
 RUN APP_BUILD="$APP_BUILD" npm run build
 
+# The exercise stills and animations, staged here so the final image can leave them out.
+# INCLUDE_EXERCISE_MEDIA=false builds an image without them (licensed from Gym visual, see
+# NOTICE.md): the app then shows a placeholder tile for every catalogue exercise.
+ARG INCLUDE_EXERCISE_MEDIA=true
+COPY catalogue/media/ /exercise-media/
+RUN if [ "$INCLUDE_EXERCISE_MEDIA" = "false" ]; then rm -rf /exercise-media/* ; fi
+
 FROM nginxinc/nginx-unprivileged:1.30.6-alpine
 # Same reason as in api/Dockerfile: alpine fixes land faster than the nginx image is rebuilt.
 # The base's last instruction is USER 101, and apk then exits 99 — it cannot open its log as
@@ -76,8 +83,9 @@ COPY web/nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY --chmod=755 web/05-check-base-path.sh /docker-entrypoint.d/
 COPY --from=build /app/frontend/dist /usr/share/nginx/html
 # The exercise stills and animations, 180 px, licensed from Gym visual for openGym only: see
-# catalogue/media/NOTICE.md. They ship inside the image; nothing is downloaded at start-up.
-COPY catalogue/media/ /usr/share/nginx/html/exercise-media/
+# catalogue/media/NOTICE.md. They ship inside the image (unless INCLUDE_EXERCISE_MEDIA=false);
+# nothing is downloaded at start-up.
+COPY --from=build /exercise-media/ /usr/share/nginx/html/exercise-media/
 
 # Set Default ENVs for nginx
 ENV NGINX_PORT=80
