@@ -1,0 +1,4 @@
+# LF everywhere, also on a Windows checkout with core.autocrlf=true: the images copy these files
+# as they are, and a CRLF shell script or index.html (whose inline script is allowed by its hash
+# in web/Dockerfile) breaks the container.
+* text=auto eol=lf
