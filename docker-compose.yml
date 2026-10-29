@@ -1,67 +1,143 @@
-name: opengym
+# =============================================================================
+# openGym – Docker Compose (Coolify-ready)
+# =============================================================================
+#
+# USAGE (Coolify):
+#   1. In Coolify → New Resource → Docker Compose → point to your Git repo.
+#   2. Coolify detects this file automatically.
+#   3. In the "web" service, set your domain (e.g. https://gym.example.com).
+#      nginx listens on port 80 inside the container, so no port suffix is needed.
+#   4. In "Environment Variables" set at least RP_ID and ORIGIN to that domain
+#      (and DEFAULT_LANG=es for Spanish). Every other variable has a safe default.
+#   5. Deploy. Register your own profile first: with FIRST_USER_ADMIN=1 it
+#      becomes the admin.
+#
+#   For local development:
+#     cp .env.example .env    # adjust if needed
+#     docker compose up -d --build     → http://localhost:8080
+#
+# NOTES:
+#   - All configuration is via environment variables (no env_file referencing
+#     a gitignored .env), which is what Coolify requires. Compose still reads a
+#     local .env for the ${...} substitutions below.
+#   - Passkeys are bound to the exact hostname (RP_ID) and need HTTPS. Coolify's
+#     Traefik terminates TLS, so ORIGIN must be the https:// address.
+#   - Only "web" is published: the app and its /api must share ONE origin for
+#     passkeys, and nginx in the web container proxies /api to "api".
+#   - Data lives in the named volume "opengym_data" (users, passkeys, workouts,
+#     session secret, uploads), or in DATA_PATH if set. Back it up.
+#   - See docs/COOLIFY.md for the step by step guide (in Spanish).
+# =============================================================================
 
 services:
-  # Passkey auth + per-user data (Node, no framework).
-  # image: prebuilt (docker compose pull). build: from source (docker compose up --build).
+  # ---------------------------------------------------------------------------
+  # openGym API (Node, no framework): passkey auth + per-user data
+  # ---------------------------------------------------------------------------
   api:
-    image: ghcr.io/duartesantos8/opengym-api:latest
-    # Default target: no AI runtime, no AI dependency — the image every instance has always had.
-    # To opt into the AI Coach, build the other target instead:
-    #     API_TARGET=coach docker compose up --build api
-    # `--build` matters: with an `image:` also set, compose would otherwise pull the prebuilt
-    # default rather than build the coach one.
     build:
       context: ./api
+      # default: no AI runtime. "coach" adds the Claude Agent SDK and Codex CLI
+      # (~300 MB). Coach providers over HTTPS (Anthropic, OpenAI, Gemini,
+      # Ollama...) work with the default target too.
       target: ${API_TARGET:-default}
     restart: unless-stopped
-    env_file: .env
-    environment:
-      # The port the API listens on. web proxies to this same value, so the two
-      # cannot drift — change it in .env and both follow.
-      - PORT=${PORT:-3000}
-      - DATA_DIR=/data
-      # The API is reachable only through the web container here, and that container overwrites
-      # X-Forwarded-For / X-Real-IP with the real peer — so the sign-in throttle may count
-      # requests by those headers instead of lumping everyone in as "the web container".
-      - TRUST_PROXY=${TRUST_PROXY:-1}
     volumes:
-      - ./data:/data         # users, passkeys, per-user state, session secret — BACK THIS UP
-                             # (and uploads/: the photos and videos of custom exercises)
-      # Provider credential cache (Codex). A sibling of ./data on purpose: the documented backup
-      # is `tar czf … data/`, and a live refresh token must not end up inside it. Nothing here
-      # needs backing up — if you lose it, sign the provider in again.
-      - ./coach-auth:/coach-auth
+      # BACK THIS UP. A named volume by default; DATA_PATH=./data keeps it in a
+      # folder next to this file instead (the layout docs/SELF_HOSTING.md assumes).
+      - ${DATA_PATH:-opengym_data}:/data
+      - ${COACH_AUTH_PATH:-opengym_coach_auth}:/coach-auth
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:$${PORT}/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    environment:
+      # ── Core ────────────────────────────────────────────────────────────
+      PORT: ${PORT:-3000}             # Internal port. web proxies to the same value.
+      DATA_DIR: /data
+      # Your public domain. RP_ID is the bare hostname, ORIGIN the full URL.
+      RP_ID: ${RP_ID:-localhost}
+      ORIGIN: ${ORIGIN:-http://localhost:8080}
+      RP_NAME: ${RP_NAME:-openGym}
+      # Language for the sign-in screen and new profiles (es, en, de, fr...).
+      DEFAULT_LANG: ${DEFAULT_LANG:-}
+      # The API is reachable only through the web container, which overwrites
+      # X-Forwarded-For / X-Real-IP, so the sign-in throttle can trust them.
+      TRUST_PROXY: ${TRUST_PROXY:-1}
 
-  # Builds the React frontend (multi-stage) and serves it, proxying /api → api
-  # and the exercise animations, which are part of the image. Single origin for passkeys.
+      # ── Accounts ────────────────────────────────────────────────────────
+      FIRST_USER_ADMIN: ${FIRST_USER_ADMIN:-1}
+      ADMIN_UIDS: ${ADMIN_UIDS:-}
+      INVITE_ONLY: ${INVITE_ONLY:-}
+      ALLOW_GUEST: ${ALLOW_GUEST:-}
+      PASSWORD_LOGIN: ${PASSWORD_LOGIN:-}
+      SESSION_DAYS: ${SESSION_DAYS:-}
+
+      # ── Activity log ────────────────────────────────────────────────────
+      AUDIT_LOG: ${AUDIT_LOG:-}
+      AUDIT_MAX: ${AUDIT_MAX:-}
+      AUDIT_DAYS: ${AUDIT_DAYS:-}
+      AUDIT_IP: ${AUDIT_IP:-}
+
+      # ── Photos and videos of custom exercises ───────────────────────────
+      MEDIA_UPLOADS: ${MEDIA_UPLOADS:-}
+      MEDIA_QUOTA_MB: ${MEDIA_QUOTA_MB:-}
+      MEDIA_IMAGE_MAX_MB: ${MEDIA_IMAGE_MAX_MB:-}
+      MEDIA_GIF_MAX_MB: ${MEDIA_GIF_MAX_MB:-}
+      MEDIA_VIDEO_MAX_MB: ${MEDIA_VIDEO_MAX_MB:-}
+      MEDIA_VIDEO_MAX_SEC: ${MEDIA_VIDEO_MAX_SEC:-}
+      MEDIA_GC_GRACE_DAYS: ${MEDIA_GC_GRACE_DAYS:-}
+      MEDIA_UPLOADS_PER_HOUR: ${MEDIA_UPLOADS_PER_HOUR:-}
+      MEDIA_MIN_FREE_MB: ${MEDIA_MIN_FREE_MB:-}
+
+      # ── Notifications (VAPID keys are generated on first run) ───────────
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-}
+
+      # ── Optional: AI Coach (off until an admin turns it on) ─────────────
+      COACH_DISABLED: ${COACH_DISABLED:-}
+      COACH_JOB_TIMEOUT_MS: ${COACH_JOB_TIMEOUT_MS:-}
+
+  # ---------------------------------------------------------------------------
+  # openGym Web (React SPA → nginx), proxies /api to the api service
+  # ---------------------------------------------------------------------------
   web:
-    image: ghcr.io/duartesantos8/opengym-web:latest
     build:
       context: .
       dockerfile: web/Dockerfile
+      args:
+        # "false" builds the image without the exercise stills and animations
+        # (catalogue/media, licensed from Gym visual): the app then shows a
+        # placeholder tile for every catalogue exercise.
+        INCLUDE_EXERCISE_MEDIA: ${INCLUDE_EXERCISE_MEDIA:-true}
     restart: unless-stopped
-    depends_on:
-      api:
-        condition: service_started
     ports:
       - "${WEB_PORT:-8080}:${NGINX_PORT:-80}"
-    # nginx renders its config at start-up from these (web/nginx.conf.template),
-    # so the API service does not have to be called `api`. Defaults are the old
-    # hardcoded values, so an existing .env and an existing stack are unaffected.
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:$${NGINX_PORT}/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
     environment:
-      - NGINX_PORT=${NGINX_PORT:-80}
-      - BACKEND=${BACKEND:-api}
-      - PORT=${PORT:-3000}
-      # Docker's embedded DNS. Only ever needs changing on a runtime that is not Docker.
-      - RESOLVER=${RESOLVER:-127.0.0.11}
-      # Empty drops the CF-Connecting-IP header, so a direct client cannot forge the address
-      # the activity log records. Cloudflare users set CF_CONNECTING_IP='$http_cf_connecting_ip'
-      # in .env, single quotes included, or Compose expands it to an empty string.
-      - CF_CONNECTING_IP=${CF_CONNECTING_IP:-}
-      # Subpath deployments behind a proxy that passes its prefix through ("/gym", no trailing
-      # slash). Empty serves the app at the site root, which is what it has always done; a proxy
-      # that strips the prefix needs nothing set (docs/SELF_HOSTING.md §5).
-      - BASE_PATH=${BASE_PATH:-}
-      # The largest photo or video upload nginx passes to the API. Keep it above
-      # MEDIA_VIDEO_MAX_MB (40 by default), which the api service reads from .env.
-      - MEDIA_UPLOAD_MAX=${MEDIA_UPLOAD_MAX:-48m}
+      WEB_PORT: ${WEB_PORT:-8080}     # External host port. Added here so Coolify detects it.
+      # nginx renders its config at start-up from these (web/nginx.conf.template).
+      NGINX_PORT: ${NGINX_PORT:-80}
+      BACKEND: ${BACKEND:-api}
+      PORT: ${PORT:-3000}
+      # Docker's embedded DNS. Only needs changing on a runtime that is not Docker.
+      RESOLVER: ${RESOLVER:-127.0.0.11}
+      # Empty drops CF-Connecting-IP so a client cannot forge its address. Behind
+      # Cloudflare set CF_CONNECTING_IP='$http_cf_connecting_ip' (single quotes).
+      CF_CONNECTING_IP: ${CF_CONNECTING_IP:-}
+      # Subpath behind a proxy that passes its prefix through ("/gym"). Empty = root.
+      BASE_PATH: ${BASE_PATH:-}
+      # Largest upload nginx passes to the API. Keep above MEDIA_VIDEO_MAX_MB.
+      MEDIA_UPLOAD_MAX: ${MEDIA_UPLOAD_MAX:-48m}
+
+volumes:
+  opengym_data:
+  opengym_coach_auth:
